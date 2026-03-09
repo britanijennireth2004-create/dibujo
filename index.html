@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="es">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Editor de imagen simple</title>
+
+  <!-- Font Awesome para iconos -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+    crossorigin="anonymous" />
+
+  <!-- Estilos -->
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="title">Editor de Imágenes</div>
+
+    <div class="actions" role="toolbar" aria-label="Acciones rápidas">
+      <!-- Solo el botón de mostrar/ocultar controles -->
+      <button id="h-toggle-controls" class="btn icon desktop-only" title="Mostrar/ocultar controles"
+        aria-label="Mostrar controles"><i class="fa-solid fa-sliders"></i></button>
+      <div id="mobile-context-actions" class="mobile-only" style="display:none;">
+
+        <button id="mobile-apply-btn" class="btn icon success" title="Aplicar"><i
+            class="fa-solid fa-check"></i></button>
+        <button id="mobile-cancel-btn" class="btn icon danger" title="Cancelar"><i
+            class="fa-solid fa-xmark"></i></button>
+      </div>
+    </div>
+
+  </header>
+
+  <main class="container">
+    <section class="canvas-area" id="canvas-area">
+      <!-- Wrapper para controlar layout y evitar overflow -->
+      <div class="canvas-wrapper" id="canvas-wrapper">
+        <canvas id="editor-canvas" width="1200" height="800"></canvas>
+      </div>
+    </section>
+
+    <aside class="controls" id="controls-panel" aria-hidden="false">
+      <div class="controls-header">
+        <strong>Controles</strong>
+        <button id="mobile-close-controls" class="btn icon close-btn" title="Cerrar"
+          aria-label="Cerrar controles">×</button>
+      </div>
+
+      <div class="control-group">
+        <label>Base / Añadir</label>
+        <input type="file" id="upload-base" accept="image/*" />
+        <input type="file" id="upload-overlay" accept="image/*" />
+      </div>
+
+      <div class="control-group">
+        <label>Seleccionado:</label>
+        <div id="selected-info">Ninguno</div>
+      </div>
+
+      <div class="control-group sliders" id="image-controls" style="display:none;">
+        <label>Brillo <span id="brightness-val">0</span></label>
+        <input type="range" id="brightness" min="-100" max="100" value="0" />
+        <label>Contraste <span id="contrast-val">0</span></label>
+        <input type="range" id="contrast" min="-100" max="100" value="0" />
+        <label>Saturación <span id="saturation-val">0</span></label>
+        <input type="range" id="saturation" min="-100" max="100" value="0" />
+        <label>Opacidad <span id="opacity-val">100</span>%</label>
+        <input type="range" id="opacity" min="0" max="100" value="100" />
+      </div>
+
+      <div class="control-group">
+        <div class="control-row">
+          <button id="crop-btn" class="btn secondary"><i class="fa-solid fa-crop-simple"></i> Recortar</button>
+          <button id="apply-crop" class="btn primary" style="display:none;"><i class="fa-solid fa-check"></i>
+            Aplicar</button>
+        </div>
+        <button id="cancel-crop" class="btn secondary" style="display:none;">Cancelar</button>
+      </div>
+
+      <div class="control-group">
+        <label>Añadir texto</label>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="text" id="text-input" placeholder="Texto" />
+          <input type="color" id="text-color" title="Color del texto" value="#111111" />
+        </div>
+        <button id="add-text" class="btn primary full"><i class="fa-solid fa-plus"></i> Añadir texto</button>
+      </div>
+
+      <div class="control-group">
+        <label>Ajustar lienzo</label>
+        <div class="control-row">
+          <button id="fit-to-image-btn" class="btn secondary"><i class="fa-solid fa-image"></i> A imagen</button>
+          <button id="fit-to-pdf-btn" class="btn secondary"><i class="fa-solid fa-file-pdf"></i> A página</button>
+        </div>
+        <button id="restore-canvas-btn" class="btn secondary full"><i class="fa-solid fa-undo"></i> Restaurar</button>
+      </div>
+
+      <div class="control-group">
+        <label>Exportar</label>
+        <div class="control-row">
+          <button id="save-png" class="btn primary"><i class="fa-solid fa-download"></i> PNG</button>
+          <button id="save-jpeg" class="btn secondary"><i class="fa-solid fa-download"></i> JPG</button>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <label>Exportar a PDF</label>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <select id="pdf-size" aria-label="Tamaño de página">
+            <option value="a4">A4 (210×297 mm)</option>
+            <option value="letter">Letter (216×279 mm)</option>
+            <option value="legal">Legal (216×356 mm)</option>
+            <option value="a3">A3 (297×420 mm)</option>
+            <option value="canvas">Usar tamaño del canvas</option>
+            <option value="custom">Personalizado (mm)</option>
+          </select>
+          <select id="pdf-orientation" aria-label="Orientación PDF">
+            <option value="portrait">Vertical</option>
+            <option value="landscape">Horizontal</option>
+          </select>
+        </div>
+
+        <div id="pdf-custom-size" style="display:none;margin-top:8px;">
+          <label style="font-weight:600;font-size:12px;color:#666;">Ancho (mm)</label>
+          <input type="number" id="pdf-custom-width-mm" value="210" min="1" />
+          <label style="font-weight:600;font-size:12px;color:#666;">Alto (mm)</label>
+          <input type="number" id="pdf-custom-height-mm" value="297" min="1" />
+        </div>
+
+        <div style="margin-top:8px;display:flex;gap:8px;align-items:center;">
+          <input type="checkbox" id="pdf-fit" checked />
+          <label for="pdf-fit" style="margin:0;">Ajustar a la página (fit to page)</label>
+        </div>
+
+        <div style="margin-top:8px;">
+          <button id="save-pdf" class="btn primary full"><i class="fa-solid fa-file-pdf"></i> Guardar PDF</button>
+        </div>
+      </div>
+
+      <div class="control-group help">
+        <small>Doble click en texto para editar. Selecciona objetos para aplicar ajustes.</small>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Fabric.js (Canvas framework) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js" crossorigin="anonymous"></script>
+  <!-- jsPDF para exportar a PDF -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" crossorigin="anonymous"></script>
+
+
+
+  <!-- Navegación Móvil Inferior -->
+  <nav class="mobile-bottom-nav mobile-only">
+    <div class="nav-item" id="m-nav-add">
+      <i class="fa-solid fa-plus"></i>
+      <span>Añadir</span>
+    </div>
+    <div class="nav-item" id="m-nav-edit">
+      <i class="fa-solid fa-pencil"></i>
+      <span>Ajustes</span>
+    </div>
+    <div class="nav-item" id="m-nav-crop">
+      <i class="fa-solid fa-crop-simple"></i>
+      <span>Recortar</span>
+    </div>
+    <div class="nav-item" id="m-nav-text">
+      <i class="fa-solid fa-font"></i>
+      <span>Texto</span>
+    </div>
+    <div class="nav-item" id="m-nav-canvas">
+      <i class="fa-solid fa-expand"></i>
+      <span>Lienzo</span>
+    </div>
+    <div class="nav-item" id="m-nav-export">
+      <i class="fa-solid fa-download"></i>
+      <span>Guardar</span>
+    </div>
+  </nav>
+
+  <!-- Contenedores para submenús y sliders móviles -->
+  <div id="mobile-floating-panels" class="mobile-only">
+    <!-- Slider Dinámico -->
+    <div id="m-slider-panel" class="floating-panel" style="display:none;">
+      <div class="panel-header">
+        <span id="m-slider-label">Ajuste</span>: <span id="m-slider-value">0</span>
+        <button class="close-panel">×</button>
+      </div>
+      <input type="range" id="m-dynamic-slider" class="full-width" />
+    </div>
+
+    <div id="m-text-panel" class="floating-panel" style="display:none;">
+      <div class="panel-header">
+        <span>Nuevo Texto</span>
+        <button class="close-panel">×</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <input type="text" id="m-text-input" placeholder="Escribe aquí..." />
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="color" id="m-text-color" value="#111111" style="width:50px;" />
+          <input type="number" id="m-text-size" placeholder="Tamaño" value="40" style="flex:1;" />
+        </div>
+      </div>
+    </div>
+
+
+    <!-- Submenús (Popups) -->
+    <div id="m-submenu-edit" class="m-popup" style="display:none;">
+      <button data-action="brightness">Brillo</button>
+      <button data-action="contrast">Contraste</button>
+      <button data-action="saturation">Saturación</button>
+      <button data-action="opacity">Opacidad</button>
+    </div>
+
+    <div id="m-submenu-canvas" class="m-popup" style="display:none;">
+      <button data-action="fit-image">A imagen</button>
+      <button data-action="fit-page">A página (Auto)</button>
+      <button data-action="a4">Tamaño A4</button>
+      <button data-action="letter">Tamaño Carta</button>
+      <button data-action="legal">Tamaño Oficio</button>
+      <button data-action="restore">Restaurar Original</button>
+    </div>
+
+
+    <div id="m-submenu-export" class="m-popup" style="display:none;">
+      <button data-action="png">PNG</button>
+      <button data-action="jpg">JPG</button>
+      <button data-action="pdf">PDF (Descarga directa)</button>
+    </div>
+  </div>
+
+
+  <script src="app.js"></script>
+</body>
+
+
+
+</html>
