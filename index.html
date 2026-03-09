@@ -8,7 +8,8 @@
 
   <!-- Font Awesome para iconos -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
-    crossorigin="anonymous" />
+    integrity="sha512-iecdLmaskl7CVkqkXNQ/ZH/XLlvWZOJyj7Yy7tcenmpD1ypASozpmT/E0iPtmFIB46ZmdtAc9eNBvH0H/ZpiBw=="
+    crossorigin="anonymous" referrerpolicy="no-referrer" />
 
   <!-- Estilos -->
   <link rel="stylesheet" href="styles.css" />
@@ -19,11 +20,25 @@
     <div class="title">Editor de Imágenes</div>
 
     <div class="actions" role="toolbar" aria-label="Acciones rápidas">
-      <!-- Solo el botón de mostrar/ocultar controles -->
-      <button id="h-toggle-controls" class="btn icon desktop-only" title="Mostrar/ocultar controles"
-        aria-label="Mostrar controles"><i class="fa-solid fa-sliders"></i></button>
-      <div id="mobile-context-actions" class="mobile-only" style="display:none;">
+      <!-- Deshacer / Rehacer (siempre visibles) -->
+      <button id="btn-undo" class="btn icon topbar-action" title="Deshacer (Ctrl+Z)" aria-label="Deshacer" disabled>
+        <i class="fa-solid fa-rotate-left"></i>
+      </button>
+      <button id="btn-redo" class="btn icon topbar-action" title="Rehacer (Ctrl+Y)" aria-label="Rehacer" disabled>
+        <i class="fa-solid fa-rotate-right"></i>
+      </button>
 
+      <!-- Separador visual -->
+      <div class="topbar-sep"></div>
+
+      <!-- Eliminar objeto seleccionado (contextual: solo visible con selección) -->
+      <button id="btn-delete" class="btn icon topbar-action danger-action" title="Eliminar seleccionado (Supr)"
+        aria-label="Eliminar" style="display:none;">
+        <i class="fa-solid fa-trash"></i>
+      </button>
+
+      <!-- Acciones contextuales (Apply/Cancel para recorte y texto) -->
+      <div id="mobile-context-actions" style="display:none;">
         <button id="mobile-apply-btn" class="btn icon success" title="Aplicar"><i
             class="fa-solid fa-check"></i></button>
         <button id="mobile-cancel-btn" class="btn icon danger" title="Cancelar"><i
@@ -152,8 +167,8 @@
 
 
 
-  <!-- Navegación Móvil Inferior -->
-  <nav class="mobile-bottom-nav mobile-only">
+  <!-- Navegación Inferior -->
+  <nav class="mobile-bottom-nav">
     <div class="nav-item" id="m-nav-add">
       <i class="fa-solid fa-plus"></i>
       <span>Añadir</span>
@@ -180,8 +195,8 @@
     </div>
   </nav>
 
-  <!-- Contenedores para submenús y sliders móviles -->
-  <div id="mobile-floating-panels" class="mobile-only">
+  <!-- Contenedores para submenús y sliders -->
+  <div id="mobile-floating-panels">
     <!-- Slider Dinámico -->
     <div id="m-slider-panel" class="floating-panel" style="display:none;">
       <div class="panel-header">
@@ -206,12 +221,60 @@
     </div>
 
 
+    <!-- Panel PDF -->
+    <div id="m-pdf-panel" class="floating-panel" style="display:none;">
+      <div class="panel-header">
+        <span>Exportar PDF</span>
+        <button class="close-panel">×</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <select id="m-pdf-size" aria-label="Tamaño de página"
+          style="padding:8px;border-radius:8px;border:1px solid rgba(0,0,0,0.08);font-size:14px;">
+          <option value="a4">A4 (210×297 mm)</option>
+          <option value="letter">Letter (216×279 mm)</option>
+          <option value="legal">Legal (216×356 mm)</option>
+          <option value="a3">A3 (297×420 mm)</option>
+          <option value="canvas">Usar tamaño del canvas</option>
+        </select>
+        <select id="m-pdf-orientation" aria-label="Orientación PDF"
+          style="padding:8px;border-radius:8px;border:1px solid rgba(0,0,0,0.08);font-size:14px;">
+          <option value="portrait">Vertical</option>
+          <option value="landscape">Horizontal</option>
+        </select>
+        <button id="m-save-pdf-btn" class="btn primary full"><i class="fa-solid fa-file-pdf"></i> Guardar PDF</button>
+      </div>
+    </div>
+
     <!-- Submenús (Popups) -->
-    <div id="m-submenu-edit" class="m-popup" style="display:none;">
+    <div id="m-submenu-edit" class="m-popup" style="display:none;max-height:60vh;overflow-y:auto;padding:4px;">
+      <div style="font-size:11px;color:#888;padding:8px 8px 4px;font-weight:bold;text-transform:uppercase;">🎨 Básicos
+      </div>
       <button data-action="brightness">Brillo</button>
       <button data-action="contrast">Contraste</button>
       <button data-action="saturation">Saturación</button>
       <button data-action="opacity">Opacidad</button>
+      <button data-action="hue">Tono</button>
+
+      <div style="font-size:11px;color:#888;padding:12px 8px 4px;font-weight:bold;text-transform:uppercase;">🔍 Efectos
+      </div>
+      <button data-action="sharpen" data-type="toggle">Nitidez</button>
+      <button data-action="blur">Desenfoque</button>
+      <button data-action="sepia" data-type="toggle">Sepia</button>
+      <button data-action="grayscale" data-type="toggle">B&N</button>
+      <button data-action="invert" data-type="toggle">Invertir</button>
+      <button data-action="pixelate">Pixelar</button>
+
+      <div style="font-size:11px;color:#888;padding:12px 8px 4px;font-weight:bold;text-transform:uppercase;">⚡
+        Transformar</div>
+      <button data-action="flip-x" data-type="action">Voltear Horizontal</button>
+      <button data-action="flip-y" data-type="action">Voltear Vertical</button>
+      <button data-action="rotate-90" data-type="action">Rotar 90°</button>
+      <button data-action="duplicate" data-type="action">Duplicar</button>
+
+      <div style="font-size:11px;color:#888;padding:12px 8px 4px;font-weight:bold;text-transform:uppercase;">🎯 Orden
+      </div>
+      <button data-action="bring-forward" data-type="action">Mover Adelante</button>
+      <button data-action="send-backward" data-type="action">Mover Atrás</button>
     </div>
 
     <div id="m-submenu-canvas" class="m-popup" style="display:none;">

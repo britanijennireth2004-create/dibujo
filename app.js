@@ -27,6 +27,34 @@ function throttle(fn, ms) {
 }
 
 
+// Patch global: todos los canvas que crea Fabric internamente
+// (cache, upper, lower) usan willReadFrequently=true para evitar
+// el aviso de rendimiento de Chrome.
+(function patchFabricCanvases() {
+  // 1) Parchar el elemento canvas del editor antes de que Fabric lo inicialice
+  const editorEl = document.getElementById('editor-canvas');
+  if (editorEl) {
+    const origGet = editorEl.getContext.bind(editorEl);
+    editorEl.getContext = (type, attrs) =>
+      origGet(type, Object.assign({ willReadFrequently: true }, attrs || {}));
+  }
+
+  // 2) Parchar fabric.util.createCanvasElement para TODOS los canvas internos
+  //    (cache de objetos, upper canvas, canvas de filtros WebGL, etc.)
+  if (window.fabric && fabric.util && fabric.util.createCanvasElement) {
+    const origCreate = fabric.util.createCanvasElement;
+    fabric.util.createCanvasElement = function () {
+      const el = origCreate.apply(this, arguments);
+      if (el && el.getContext) {
+        const origCtx = el.getContext.bind(el);
+        el.getContext = (type, attrs) =>
+          origCtx(type, Object.assign({ willReadFrequently: true }, attrs || {}));
+      }
+      return el;
+    };
+  }
+})();
+
 // Crear canvas Fabric
 const canvas = new fabric.Canvas('editor-canvas', {
   backgroundColor: '#ffffff',
@@ -79,12 +107,6 @@ const textInput = $('text-input');
 const addTextBtn = $('add-text');
 const textColorInput = $('text-color');
 
-const hToggleControls = $('h-toggle-controls');
-const mobileCloseControls = $('mobile-close-controls');
-const controlsPanel = $('controls-panel');
-
-const canvasWrapper = $('canvas-wrapper'); // wrapper que controla layout
-
 // Mobile DOM Elements
 const mNavAdd = $('m-nav-add');
 const mNavEdit = $('m-nav-edit');
@@ -114,37 +136,134 @@ const mContextActions = $('mobile-context-actions');
 const mApplyBtn = $('mobile-apply-btn');
 const mCancelBtn = $('mobile-cancel-btn');
 
+// Topbar history / delete buttons
+const btnUndo = $('btn-undo');
+const btnRedo = $('btn-redo');
+const btnDelete = $('btn-delete');
+
 let activeMobileMode = null; // 'crop', 'text', 'adjustment'
 let currentAdjustmentType = null;
 
 
+// ================================================================
+// HISTORIAL DE DESHACER / REHACER
+// ================================================================
+(function initHistory() {
+  const MAX_HISTORY = 40;       // máximo de estados almacenados
+  const historyStack = [];      // pila de snapshots JSON
+  let historyIndex = -1;        // posición actual en la pila
+  let isRestoring = false;      // bandera para evitar registrar cambios al restaurar
 
-// Header toggle: mostrar/ocultar panel de controles
-hToggleControls.addEventListener('click', () => {
-  const isOpen = document.body.classList.toggle('show-controls');
-  controlsPanel.setAttribute('aria-hidden', !isOpen);
-  document.body.style.overflow = isOpen ? 'hidden' : '';
-  setTimeout(() => fitZoomToContainer(), 180);
-});
-mobileCloseControls.addEventListener('click', () => {
-  document.body.classList.remove('show-controls');
-  controlsPanel.setAttribute('aria-hidden', 'true');
-  document.body.style.overflow = '';
-});
+  /** Captura el estado actual del canvas y lo guarda en la pila */
+  function saveSnapshot() {
+    if (isRestoring) return;
 
-// Ajustes de resize
-// Ajustes de resize con debounce para mejorar rendimiento
-const debouncedResize = debounce(() => {
-  if (window.innerWidth > 900) {
-    document.body.classList.remove('show-controls');
-    controlsPanel.setAttribute('aria-hidden', 'false');
-    document.body.style.overflow = '';
-  } else {
-    // Si no está el menú abierto, ocultar panel
-    if (!document.body.classList.contains('show-controls')) {
-      controlsPanel.setAttribute('aria-hidden', 'true');
-    }
+    // Si estamos en modo recorte, no guardar
+    if (croppingRect && croppingRect._isCropping) return;
+
+    // Serializar el canvas completo
+    const json = JSON.stringify(canvas.toJSON(['selectable', 'hasControls', 'lockRotation', '_isCropping']));
+
+    // Si el snapshot es igual al actual (no hubo cambio real), no duplicar
+    if (historyIndex >= 0 && historyStack[historyIndex] === json) return;
+
+    // Descartar cualquier "futuro" si estamos a mitad de la pila
+    historyStack.splice(historyIndex + 1);
+
+    historyStack.push(json);
+    if (historyStack.length > MAX_HISTORY) historyStack.shift();
+    historyIndex = historyStack.length - 1;
+
+    refreshHistoryButtons();
   }
+
+  /** Actualiza el estado enabled/disabled de los botones */
+  function refreshHistoryButtons() {
+    if (btnUndo) btnUndo.disabled = (historyIndex <= 0);
+    if (btnRedo) btnRedo.disabled = (historyIndex >= historyStack.length - 1);
+  }
+
+  /** Restaura un snapshot de la pila */
+  function restoreSnapshot(index) {
+    if (index < 0 || index >= historyStack.length) return;
+    isRestoring = true;
+    const json = historyStack[index];
+    canvas.loadFromJSON(json, () => {
+      canvas.requestRenderAll();
+      fitZoomToContainer();
+      historyIndex = index;
+      refreshHistoryButtons();
+      // Actualizar botón delete después de restaurar
+      updateDeleteBtn();
+      isRestoring = false;
+    });
+  }
+
+  /** Deshacer: retrocede un paso en la pila */
+  window.historyUndo = function () {
+    if (historyIndex > 0) restoreSnapshot(historyIndex - 1);
+  };
+
+  /** Rehacer: avanza un paso en la pila */
+  window.historyRedo = function () {
+    if (historyIndex < historyStack.length - 1) restoreSnapshot(historyIndex + 1);
+  };
+
+  // Exponer saveSnapshot globalmente para llamarla desde otros puntos
+  window.historySave = saveSnapshot;
+
+  // ---- Eventos del canvas que disparan guardado de historial ----
+  // Usamos debounce en object:modified para no guardar en cada frame de arrastre
+  const debouncedSave = debounce(saveSnapshot, 300);
+
+  canvas.on('object:added', () => { if (!isRestoring) saveSnapshot(); });
+  canvas.on('object:removed', () => { if (!isRestoring) saveSnapshot(); });
+  canvas.on('object:modified', () => { if (!isRestoring) debouncedSave(); });
+  canvas.on('object:scaled', () => { if (!isRestoring) debouncedSave(); });
+  canvas.on('object:moved', () => { if (!isRestoring) debouncedSave(); });
+  canvas.on('object:rotated', () => { if (!isRestoring) debouncedSave(); });
+
+  // Captura inicial (lienzo vacío)
+  saveSnapshot();
+
+  // ---- Botones del topbar ----
+  if (btnUndo) btnUndo.addEventListener('click', window.historyUndo);
+  if (btnRedo) btnRedo.addEventListener('click', window.historyRedo);
+
+  refreshHistoryButtons();
+})();
+
+
+// ================================================================
+// BOTÓN ELIMINAR (contextual según selección)
+// ================================================================
+function updateDeleteBtn() {
+  if (!btnDelete) return;
+  const obj = canvas.getActiveObject();
+  btnDelete.style.display = obj ? 'inline-flex' : 'none';
+}
+
+function deleteSelected() {
+  const activeObj = canvas.getActiveObject();
+  if (!activeObj) return;
+  if (activeObj.isEditing) return;
+  if (activeObj.type === 'activeSelection') {
+    activeObj.forEachObject(obj => canvas.remove(obj));
+    canvas.discardActiveObject();
+  } else {
+    canvas.remove(activeObj);
+  }
+  canvas.requestRenderAll();
+  updateDeleteBtn();
+}
+
+if (btnDelete) btnDelete.addEventListener('click', deleteSelected);
+
+
+
+
+// resize handler: recalculate zoom on resize
+const debouncedResize = debounce(() => {
   fitZoomToContainer();
 }, 100);
 
@@ -234,9 +353,17 @@ function ensureFilters(imgObj) {
   let hasBrightness = imgObj.filters.find(f => f && f.type === 'Brightness');
   let hasContrast = imgObj.filters.find(f => f && f.type === 'Contrast');
   let hasSaturation = imgObj.filters.find(f => f && f.type === 'Saturation');
+  let hasHue = imgObj.filters.find(f => f && f.type === 'HueRotation');
+  let hasBlur = imgObj.filters.find(f => f && f.type === 'Blur');
+  let hasPixel = imgObj.filters.find(f => f && f.type === 'Pixelate');
+
   if (!hasBrightness) imgObj.filters.push(new F.Brightness({ brightness: 0 }));
   if (!hasContrast) imgObj.filters.push(new F.Contrast({ contrast: 0 }));
   if (!hasSaturation) imgObj.filters.push(new F.Saturation({ saturation: 0 }));
+  if (!hasHue) imgObj.filters.push(new F.HueRotation({ rotation: 0 }));
+  if (!hasBlur) imgObj.filters.push(new F.Blur({ blur: 0 }));
+  if (!hasPixel) imgObj.filters.push(new F.Pixelate({ blocksize: 1 }));
+
   imgObj.applyFilters();
 }
 
@@ -282,52 +409,59 @@ function applySlidersToObject(obj) {
 
 
 // ---------------- Carga de imágenes ----------------
+// Usamos FileReader (data: URL) en lugar de createObjectURL (blob: URL)
+// para que los snapshots del historial puedan recargar las imágenes.
+function loadFileAsDataURL(file, callback) {
+  const reader = new FileReader();
+  reader.onload = (e) => callback(e.target.result);
+  reader.readAsDataURL(file);
+}
+
 uploadBase.addEventListener('change', (ev) => {
   const file = ev.target.files[0]; if (!file) return;
-  const url = URL.createObjectURL(file);
-  fabric.Image.fromURL(url, function (img) {
-    img.set({ left: internalSize.width / 2, top: internalSize.height / 2, originX: 'center', originY: 'center', selectable: true, hasControls: true });
-    const maxW = internalSize.width * 0.95, maxH = internalSize.height * 0.95;
-    const fitScale = Math.min(maxW / img.width, maxH / img.height);
-    // permitir upscale moderado (hasta 2x) para que imágenes pequeñas no queden diminutas
-    let scale = (isFinite(fitScale) && fitScale > 0) ? Math.min(fitScale, 2) : 1;
-    // si la imagen ya es muy grande y fitScale > 1, ajustar no subiendo demasiado
-    img.scale(scale);
-    canvas.add(img).setActiveObject(img);
-    URL.revokeObjectURL(url);
-    canvas.requestRenderAll();
-    // Ajustar automáticamente el lienzo al tamaño de la imagen subida
-    try {
-      fitCanvasToSelectedImage();
-    } catch (e) {
-      // En caso de fallo, seguimos con el ajuste de zoom habitual
-    }
-    fitZoomToContainer();
-  }, { crossOrigin: 'anonymous' });
+  loadFileAsDataURL(file, (dataUrl) => {
+    fabric.Image.fromURL(dataUrl, function (img) {
+      img.set({ left: internalSize.width / 2, top: internalSize.height / 2, originX: 'center', originY: 'center', selectable: true, hasControls: true });
+      const maxW = internalSize.width * 0.95, maxH = internalSize.height * 0.95;
+      const fitScale = Math.min(maxW / img.width, maxH / img.height);
+      let scale = (isFinite(fitScale) && fitScale > 0) ? Math.min(fitScale, 2) : 1;
+      img.scale(scale);
+      canvas.add(img).setActiveObject(img);
+      canvas.requestRenderAll();
+      try {
+        fitCanvasToSelectedImage();
+      } catch (e) { }
+      fitZoomToContainer();
+    });
+  });
   ev.target.value = '';
 });
 
 uploadOverlay.addEventListener('change', (ev) => {
   const file = ev.target.files[0]; if (!file) return;
-  const url = URL.createObjectURL(file);
-  fabric.Image.fromURL(url, function (img) {
-    img.set({ left: internalSize.width / 2 + 40, top: internalSize.height / 2 + 40, originX: 'center', originY: 'center', selectable: true, hasControls: true });
-    const maxW = internalSize.width * 0.9, maxH = internalSize.height * 0.9;
-    const fitScale = Math.min(maxW / img.width, maxH / img.height);
-    let scale = (isFinite(fitScale) && fitScale > 0) ? Math.min(fitScale, 1.5) : 1;
-    img.scale(scale);
-    canvas.add(img).setActiveObject(img);
-    URL.revokeObjectURL(url);
-    canvas.requestRenderAll();
-    fitZoomToContainer();
-  }, { crossOrigin: 'anonymous' });
+  loadFileAsDataURL(file, (dataUrl) => {
+    fabric.Image.fromURL(dataUrl, function (img) {
+      img.set({ left: internalSize.width / 2 + 40, top: internalSize.height / 2 + 40, originX: 'center', originY: 'center', selectable: true, hasControls: true });
+      const maxW = internalSize.width * 0.9, maxH = internalSize.height * 0.9;
+      const fitScale = Math.min(maxW / img.width, maxH / img.height);
+      let scale = (isFinite(fitScale) && fitScale > 0) ? Math.min(fitScale, 1.5) : 1;
+      img.scale(scale);
+      canvas.add(img).setActiveObject(img);
+      canvas.requestRenderAll();
+      fitZoomToContainer();
+    });
+  });
   ev.target.value = '';
 });
 
 // ---------------- Selección y texto ----------------
-canvas.on('selection:created', updateSelected);
-canvas.on('selection:updated', updateSelected);
-canvas.on('selection:cleared', () => { selectedInfo.textContent = 'Ninguno'; imageControls.style.display = 'none'; });
+canvas.on('selection:created', (e) => { updateSelected(e); updateDeleteBtn(); });
+canvas.on('selection:updated', (e) => { updateSelected(e); updateDeleteBtn(); });
+canvas.on('selection:cleared', () => {
+  selectedInfo.textContent = 'Ninguno';
+  imageControls.style.display = 'none';
+  updateDeleteBtn();
+});
 
 canvas.on('mouse:dblclick', function (opt) {
   const target = opt.target;
@@ -785,8 +919,21 @@ restoreCanvasBtn.addEventListener('click', () => restoreOriginalCanvasSize());
 // Inicial
 fitZoomToContainer();
 
-// Teclas: delete/backspace - Corregido para no interferir con edición de texto
+// Teclas: delete/backspace + Ctrl+Z / Ctrl+Y
 document.addEventListener('keydown', (e) => {
+  // Ctrl+Z = Deshacer
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+    e.preventDefault();
+    if (typeof window.historyUndo === 'function') window.historyUndo();
+    return;
+  }
+  // Ctrl+Y o Ctrl+Shift+Z = Rehacer
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+    e.preventDefault();
+    if (typeof window.historyRedo === 'function') window.historyRedo();
+    return;
+  }
+
   const activeObj = canvas.getActiveObject();
   if (!activeObj) return;
 
@@ -799,14 +946,7 @@ document.addEventListener('keydown', (e) => {
   }
 
   if (e.key === 'Delete' || e.key === 'Backspace') {
-    // Si es un grupo seleccionado, borrar todos
-    if (activeObj.type === 'activeSelection') {
-      activeObj.forEachObject(obj => canvas.remove(obj));
-      canvas.discardActiveObject();
-    } else {
-      canvas.remove(activeObj);
-    }
-    canvas.requestRenderAll();
+    deleteSelected();
   }
 });
 
@@ -857,9 +997,8 @@ function hideAllMobilePanels() {
 
 
 
-// Global click to close popups
+// Global click to close popups when clicking outside
 document.addEventListener('click', (e) => {
-  if (window.innerWidth > 900) return;
   if (!e.target.closest('.nav-item') && !e.target.closest('.m-popup') && !e.target.closest('.floating-panel') && !e.target.closest('.topbar')) {
     hideAllMobilePanels();
   }
@@ -886,10 +1025,62 @@ if (mSubmenuEdit) {
   mSubmenuEdit.querySelectorAll('button').forEach(btn => {
     btn.addEventListener('click', () => {
       const type = btn.getAttribute('data-action');
+      const dataType = btn.getAttribute('data-type');
       const obj = canvas.getActiveObject();
-      if (!obj || obj.type !== 'image') { alert('Selecciona una imagen primero.'); return; }
+      if (!obj) { alert('Selecciona un objeto primero.'); return; }
 
       hideAllMobilePanels();
+
+      // Acciones directas o toggles
+      if (dataType === 'action' || dataType === 'toggle') {
+        if (dataType === 'action') {
+          if (type === 'flip-x') obj.set('flipX', !obj.flipX);
+          else if (type === 'flip-y') obj.set('flipY', !obj.flipY);
+          else if (type === 'rotate-90') obj.rotate((obj.angle || 0) + 90);
+          else if (type === 'duplicate') {
+            obj.clone((cloned) => {
+              cloned.set({ left: obj.left + 20, top: obj.top + 20 });
+              canvas.add(cloned);
+              canvas.setActiveObject(cloned);
+              canvas.requestRenderAll();
+              if (window.historySave) window.historySave();
+            });
+            return;
+          }
+          else if (type === 'bring-forward') canvas.bringForward(obj);
+          else if (type === 'send-backward') canvas.sendBackwards(obj);
+
+          obj.setCoords();
+          canvas.requestRenderAll();
+          if (window.historySave) window.historySave();
+        } else if (dataType === 'toggle') {
+          if (obj.type !== 'image') { alert('Selececciona una imagen.'); return; }
+          const F = fabric.Image.filters;
+          if (!obj.filters) obj.filters = [];
+
+          const filterClasses = { sepia: F.Sepia, grayscale: F.Grayscale, invert: F.Invert, sharpen: F.Convolute };
+          const filterName = type === 'sharpen' ? 'Convolute' : (type.charAt(0).toUpperCase() + type.slice(1));
+          const existingIdx = obj.filters.findIndex(f => f && f.type === filterName);
+
+          if (existingIdx > -1) {
+            obj.filters.splice(existingIdx, 1);
+          } else {
+            if (type === 'sharpen') {
+              obj.filters.push(new F.Convolute({ matrix: [0, -1, 0, -1, 5, -1, 0, -1, 0] }));
+            } else if (filterClasses[type]) {
+              obj.filters.push(new filterClasses[type]());
+            }
+          }
+          obj.applyFilters();
+          canvas.requestRenderAll();
+          if (window.historySave) window.historySave();
+        }
+        return;
+      }
+
+      // Si no es action/toggle, es un ajuste con slider
+      if (obj.type !== 'image') { alert('Selecciona una imagen primero.'); return; }
+
       currentAdjustmentType = type;
       if (mSliderPanel) mSliderPanel.style.display = 'block';
       if (mSliderLabel) mSliderLabel.textContent = btn.textContent;
@@ -899,6 +1090,9 @@ if (mSubmenuEdit) {
       const b = f.find(f => f && f.type === 'Brightness');
       const c = f.find(f => f && f.type === 'Contrast');
       const s = f.find(f => f && f.type === 'Saturation');
+      const hue = f.find(f => f && f.type === 'HueRotation');
+      const blur = f.find(f => f && f.type === 'Blur');
+      const pixel = f.find(f => f && f.type === 'Pixelate');
 
       if (type === 'brightness' && mDynamicSlider) {
         mDynamicSlider.min = -100; mDynamicSlider.max = 100;
@@ -912,7 +1106,17 @@ if (mSubmenuEdit) {
       } else if (type === 'opacity' && mDynamicSlider) {
         mDynamicSlider.min = 0; mDynamicSlider.max = 100;
         mDynamicSlider.value = Math.round((obj.opacity ?? 1) * 100);
+      } else if (type === 'hue' && mDynamicSlider) {
+        mDynamicSlider.min = -100; mDynamicSlider.max = 100;
+        mDynamicSlider.value = Math.round((hue?.rotation ?? 0) * 50);
+      } else if (type === 'blur' && mDynamicSlider) {
+        mDynamicSlider.min = 0; mDynamicSlider.max = 100;
+        mDynamicSlider.value = Math.round((blur?.blur ?? 0) * 100);
+      } else if (type === 'pixelate' && mDynamicSlider) {
+        mDynamicSlider.min = 1; mDynamicSlider.max = 100;
+        mDynamicSlider.value = pixel?.blocksize ?? 1;
       }
+
       if (mSliderValue && mDynamicSlider) mSliderValue.textContent = mDynamicSlider.value;
     });
   });
@@ -924,21 +1128,32 @@ if (mDynamicSlider) {
     const obj = canvas.getActiveObject();
     if (!obj || obj.type !== 'image') return;
 
+    ensureFilters(obj); // asegurarse que existen los filtros dinámicos
     const f = obj.filters;
     const val = parseInt(mDynamicSlider.value);
 
     if (currentAdjustmentType === 'brightness') {
-      const b = f.find(f => f && f.type === 'Brightness');
-      if (b) b.brightness = mapFilter(val);
+      const filter = f.find(f => f && f.type === 'Brightness');
+      if (filter) filter.brightness = mapFilter(val);
     } else if (currentAdjustmentType === 'contrast') {
-      const c = f.find(f => f && f.type === 'Contrast');
-      if (c) c.contrast = mapFilter(val);
+      const filter = f.find(f => f && f.type === 'Contrast');
+      if (filter) filter.contrast = mapFilter(val);
     } else if (currentAdjustmentType === 'saturation') {
-      const s = f.find(f => f && f.type === 'Saturation');
-      if (s) s.saturation = val / 100;
+      const filter = f.find(f => f && f.type === 'Saturation');
+      if (filter) filter.saturation = val / 100;
     } else if (currentAdjustmentType === 'opacity') {
       obj.opacity = val / 100;
+    } else if (currentAdjustmentType === 'hue') {
+      const filter = f.find(f => f && f.type === 'HueRotation');
+      if (filter) filter.rotation = val / 50;
+    } else if (currentAdjustmentType === 'blur') {
+      const filter = f.find(f => f && f.type === 'Blur');
+      if (filter) filter.blur = val / 100;
+    } else if (currentAdjustmentType === 'pixelate') {
+      const filter = f.find(f => f && f.type === 'Pixelate');
+      if (filter) filter.blocksize = Math.max(1, val);
     }
+
     throttledApplyFilters(obj);
   });
 }
@@ -1074,3 +1289,199 @@ if (mCancelBtn) {
 document.querySelectorAll('.close-panel').forEach(btn => {
   btn.addEventListener('click', hideAllMobilePanels);
 });
+
+
+// ================================================================
+// PINCH-TO-SCALE — Escalar objetos del lienzo con pellizco o
+// Ctrl+rueda del ratón (trackpad pinch en escritorio).
+// ================================================================
+
+(function initPinchToScale() {
+
+  // ------- HUD: indicador de escala flotante -------
+  const hud = document.createElement('div');
+  hud.id = 'pinch-hud';
+  Object.assign(hud.style, {
+    position: 'fixed',
+    background: 'rgba(0,0,0,0.65)',
+    color: '#fff',
+    padding: '6px 14px',
+    borderRadius: '20px',
+    fontSize: '13px',
+    fontWeight: '700',
+    fontFamily: 'Inter, sans-serif',
+    pointerEvents: 'none',
+    zIndex: '2000',
+    opacity: '0',
+    transition: 'opacity 0.2s ease',
+    whiteSpace: 'nowrap',
+    backdropFilter: 'blur(4px)',
+    letterSpacing: '0.5px',
+  });
+  document.body.appendChild(hud);
+
+  let hudTimeout = null;
+  function showHud(text, x, y) {
+    hud.textContent = text;
+    hud.style.left = (x - hud.offsetWidth / 2) + 'px';
+    hud.style.top = (y - 48) + 'px';
+    hud.style.opacity = '1';
+    clearTimeout(hudTimeout);
+  }
+  function hideHud() {
+    hudTimeout = setTimeout(() => { hud.style.opacity = '0'; }, 600);
+  }
+
+  // ------- Estado del gesto -------
+  let pinchTarget = null;       // objeto Fabric que se está escalando
+  let pinchStartDist = 0;       // distancia inicial entre los dos dedos
+  let pinchStartScaleX = 1;     // scaleX del objeto al inicio del gesto
+  let pinchStartScaleY = 1;     // scaleY del objeto al inicio del gesto
+  let pinchMidX = 0;            // punto medio del gesto (para el HUD)
+  let pinchMidY = 0;
+
+  // Distancia euclidiana entre dos touch points
+  function touchDist(t1, t2) {
+    const dx = t1.clientX - t2.clientX;
+    const dy = t1.clientY - t2.clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  // Punto medio entre dos touch points (en coordenadas de ventana)
+  function touchMid(t1, t2) {
+    return {
+      x: (t1.clientX + t2.clientX) / 2,
+      y: (t1.clientY + t2.clientY) / 2,
+    };
+  }
+
+  // Obtener el objeto Fabric bajo un punto de pantalla
+  function getFabricObjectAt(clientX, clientY) {
+    const canvasEl = canvas.upperCanvasEl || canvas.lowerCanvasEl;
+    const rect = canvasEl.getBoundingClientRect();
+    const zoom = canvas.getZoom();
+    const vpt = canvas.viewportTransform || [1, 0, 0, 1, 0, 0];
+    // coordenadas en el espacio interno del canvas
+    const fx = ((clientX - rect.left) / zoom) - vpt[4] / zoom;
+    const fy = ((clientY - rect.top) / zoom) - vpt[5] / zoom;
+    return canvas.findTarget({ clientX, clientY }, false)
+      || canvas.getActiveObject()
+      || null;
+  }
+
+  // ---------- TOUCH EVENTS ----------
+  const canvasWrapEl = document.getElementById('canvas-wrapper');
+
+  canvasWrapEl.addEventListener('touchstart', (e) => {
+    // Ignorar si estamos en modo recorte
+    if (croppingRect && croppingRect._isCropping) return;
+    if (e.touches.length !== 2) return;
+
+    e.preventDefault();
+
+    const t1 = e.touches[0];
+    const t2 = e.touches[1];
+    const mid = touchMid(t1, t2);
+
+    pinchStartDist = touchDist(t1, t2);
+    pinchMidX = mid.x;
+    pinchMidY = mid.y;
+
+    // Intentar seleccionar un objeto bajo el punto medio
+    let target = canvas.getActiveObject();
+    if (!target) {
+      target = getFabricObjectAt(mid.x, mid.y);
+      if (target) canvas.setActiveObject(target);
+    }
+    pinchTarget = target;
+
+    if (pinchTarget) {
+      pinchStartScaleX = pinchTarget.scaleX || 1;
+      pinchStartScaleY = pinchTarget.scaleY || 1;
+      showHud(`${Math.round(pinchStartScaleX * 100)}%`, mid.x, mid.y);
+    }
+  }, { passive: false });
+
+  canvasWrapEl.addEventListener('touchmove', (e) => {
+    if (croppingRect && croppingRect._isCropping) return;
+    if (e.touches.length !== 2 || !pinchTarget || pinchStartDist === 0) return;
+
+    e.preventDefault();
+
+    const t1 = e.touches[0];
+    const t2 = e.touches[1];
+    const currentDist = touchDist(t1, t2);
+    const mid = touchMid(t1, t2);
+    pinchMidX = mid.x;
+    pinchMidY = mid.y;
+
+    const ratio = currentDist / pinchStartDist;
+    const minScale = 0.05;
+    const maxScale = 20;
+
+    const newScaleX = Math.min(maxScale, Math.max(minScale, pinchStartScaleX * ratio));
+    const newScaleY = Math.min(maxScale, Math.max(minScale, pinchStartScaleY * ratio));
+
+    pinchTarget.set({ scaleX: newScaleX, scaleY: newScaleY });
+    pinchTarget.setCoords();
+    canvas.requestRenderAll();
+
+    const pct = Math.round(newScaleX * 100);
+    showHud(`${pct}%`, mid.x, mid.y);
+  }, { passive: false });
+
+  canvasWrapEl.addEventListener('touchend', (e) => {
+    if (e.touches.length < 2) {
+      if (pinchTarget) {
+        pinchTarget.setCoords();
+        canvas.requestRenderAll();
+        hideHud();
+        pinchTarget = null;
+        pinchStartDist = 0;
+      }
+    }
+  }, { passive: true });
+
+  canvasWrapEl.addEventListener('touchcancel', () => {
+    pinchTarget = null;
+    pinchStartDist = 0;
+    hideHud();
+  }, { passive: true });
+
+
+  // ---------- CTRL + RUEDA DEL RATÓN (trackpad pinch en escritorio) ----------
+  // Los navegadores reportan el gesto de pellizco en trackpad como evento
+  // wheel con ctrlKey=true y deltaY negativo/positivo.
+
+  const WHEEL_SCALE_SENSITIVITY = 0.005; // cuánto escalar por unidad de deltaY
+
+  canvasWrapEl.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey) return; // solo cuando Ctrl está presionado (o gesto trackpad)
+    e.preventDefault();
+
+    const obj = canvas.getActiveObject();
+    if (!obj) return;
+    if (croppingRect && croppingRect._isCropping) return;
+
+    const currentScaleX = obj.scaleX || 1;
+    const currentScaleY = obj.scaleY || 1;
+
+    // deltaY positivo = aléjar (reducir escala), negativo = acercar (ampliar)
+    const factor = 1 - e.deltaY * WHEEL_SCALE_SENSITIVITY;
+    const minScale = 0.05;
+    const maxScale = 20;
+
+    const newScaleX = Math.min(maxScale, Math.max(minScale, currentScaleX * factor));
+    const newScaleY = Math.min(maxScale, Math.max(minScale, currentScaleY * factor));
+
+    obj.set({ scaleX: newScaleX, scaleY: newScaleY });
+    obj.setCoords();
+    canvas.requestRenderAll();
+
+    // Posición del HUD: cerca del cursor
+    const pct = Math.round(newScaleX * 100);
+    showHud(`${pct}%`, e.clientX, e.clientY);
+    hideHud();
+  }, { passive: false });
+
+})(); // fin initPinchToScale
